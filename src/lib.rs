@@ -3,20 +3,27 @@
 pub mod parser;
 
 use color_eyre::{
-    eyre::{eyre, ContextCompat, Error},
+    eyre::{eyre, ContextCompat},
     Result,
 };
 use im_rc::HashMap;
-use std::fmt;
+use std::{
+    fmt,
+    ops::{Deref, DerefMut},
+};
 
-#[derive(Clone, Debug)]
+type Level = u8;
+
+type Name = String;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
-    U(Option<u8>),
+    U(Option<Level>),
     Nat,
     Zero,
     Succ(Box<Expr>),
     NatLit(u64),
-    Var(String),
+    Var(Name),
     Pi(String, Box<Expr>, Box<Expr>),
     The(Box<Expr>, Box<Expr>),
     Lam(String, Box<Expr>),
@@ -24,117 +31,159 @@ pub enum Expr {
     Plus(Box<Expr>, Box<Expr>),
 }
 
+#[derive(Clone, Debug)]
+pub enum Value {
+    Neutral(Box<Ty>, Neutral),
+    U(u8),
+    Nat,
+    NatLit(u64),
+    Pi(Box<Ty>, Closure),
+    Lam(Closure),
+}
+
+#[derive(Clone, Debug)]
+pub struct Env(HashMap<Name, Value>);
+
+impl Env {
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    fn extend(&self, x: Name, v: Value) -> Result<Self> {
+        if self.contains_key(&x) {
+            return Err(eyre!("{x} already exists"));
+        }
+
+        Ok(Self(self.update(x, v)))
+    }
+}
+
+impl From<Ctx> for Env {
+    fn from(value: Ctx) -> Self {
+        Self(
+            value
+                .0
+                .into_iter()
+                .map(|(x, (t, o))| {
+                    let v = match o {
+                        None => Value::Neutral(box t, Neutral::Var(x.clone())),
+                        Some(v) => v,
+                    };
+
+                    (x, v)
+                })
+                .collect(),
+        )
+    }
+}
+
+impl Deref for Env {
+    type Target = HashMap<Name, Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Clone)]
+pub struct Ctx(HashMap<Name, (Ty, Option<Value>)>);
+
+impl Deref for Ctx {
+    type Target = HashMap<Name, (Ty, Option<Value>)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Ctx {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Ctx {
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    fn lookup_type(&self, x: &Name) -> Result<&Ty> {
+        let (t, _v) = self
+            .get(x)
+            .wrap_err_with(|| eyre!("Unbound variable: {x}"))?;
+        Ok(t)
+    }
+
+    fn extend(&self, x: Name, t: Ty) -> Result<Self> {
+        if self.contains_key(&x) {
+            return Err(eyre!("Variable already exists: {x}"));
+        }
+
+        Ok(Self(self.update(x, (t, None))))
+    }
+}
+
 impl Expr {
-    fn check(&self, ty: &Ty, ctx: HashMap<String, Ty>) -> Result<()> {
+    pub fn check(&self, t: &Ty, ctx: Ctx) -> Result<()> {
         match self {
-            Self::U(o) => match ty {
-                Ty::U(i) if o.map(|j| j < *i).unwrap_or_else(|| *i != 0) => Ok(()),
-                _ => Err(eyre!("expected a {ty}, found {self}")),
-            },
-            Self::Nat => match ty {
-                Ty::U(_i) => Ok(()),
-                _ => Err(eyre!("expected a {ty}, found {self}")),
-            },
-            Self::Succ(e) => match ty {
-                Ty::Nat => e.check(ty, ctx),
-                _ => Err(eyre!("expected a {ty}, found {self}")),
-            },
-            Self::Zero | Self::NatLit(_) => match ty {
-                Ty::Nat => Ok(()),
-                _ => Err(eyre!("expected a {ty}, found {self}")),
-            },
-            // Self::Var(x) => {
-            //     let ty_1 = ctx.get(x).wrap_err_with(|| eyre!("{x} not found"))?;
-            //
-            //     if ty_1 != ty {
-            //         return Err(eyre!("type mismatch: {ty_1} != {ty}"));
-            //     }
-            //
-            //     Ok(())
-            // }
-            Self::Pi(x, e_1, e_2) => match ty {
-                Ty::U(i) => {
-                    let ty_1 = e_1.try_into_type(*i)?;
+            Self::U(o) => {
+                let i = o.unwrap_or_default();
 
-                    if ctx.contains_key(x) {
-                        return Err(eyre!("{x} already exists"));
-                    }
+                let Ty::U(j) = t else {
+                    return Err(eyre!("error"));
+                };
 
-                    let ctx_1 = ctx.update(x.to_owned(), ty_1);
-                    e_2.check(&Ty::U(*i), ctx_1)
-                }
-                _ => Err(eyre!("expected a {ty}, found {self}")),
-            },
-            // Self::The(box e_1, e_2) => {
-            //     let ty_1: Ty = e_1.to_owned().try_into()?;
-            //
-            //     if ty_1 != *ty {
-            //         return Err(eyre!("type mismatch: {ty_1} != {ty}"));
-            //     }
-            //
-            //     e_2.check(ty, ctx)
-            // }
-            Self::Lam(x, e) => match ty {
-                Ty::Pi(y, box ty_1, ty_2) if y == x => {
-                    if ctx.contains_key(x) {
-                        return Err(eyre!("{x} already exists"));
-                    }
-
-                    let ctx_1 = ctx.update(x.to_owned(), ty_1.to_owned());
-                    e.check(ty_2, ctx_1)
-                }
-                _ => Err(eyre!("expected a {ty}, found {self}")),
-            },
-            // Self::App(e_1, e_2) => {
-            //     let ty_1 = e_1.synth(ctx.clone())?;
-            //
-            //     match ty_1 {
-            //         Ty::Pi(_x, ty_2, ty_3) => {
-            //             e_2.check(&ty_2, ctx)?;
-            //
-            //             if *ty_3 != *ty {
-            //                 return Err(eyre!("type mismatch: {ty_3} != {ty}"));
-            //             }
-            //
-            //             Ok(())
-            //         }
-            //         _ => Err(eyre!("expected a function, found {e_1}")),
-            //     }
-            // }
-            // Self::Plus(e_1, e_2) => match ty {
-            //     Ty::Nat => {
-            //         e_1.check(ty, ctx.clone())?;
-            //         e_2.check(ty, ctx)?;
-            //         Ok(())
-            //     }
-            //     _ => Err(eyre!("expected a {ty}, found {self}")),
-            // },
-            _ => {
-                let ty_1 = self.synth(ctx)?;
-
-                if ty_1 != *ty {
-                    return Err(eyre!("type mismatch: {ty_1} != {ty}"));
+                if i >= *j {
+                    return Err(eyre!("error"));
                 }
 
                 Ok(())
             }
-        }
-    }
+            Self::Nat => {
+                let Ty::U(_i) = t else {
+                    return Err(eyre!("error"));
+                };
 
-    fn try_into_type(&self, i: u8) -> Result<Ty> {
-        match self {
-            Self::U(o) if let j = o.unwrap_or(0) && j < i => Ok(Ty::U(j)),
-            Self::Nat => Ok(Ty::Nat),
-            Self::Pi(x, e_1, e_2) => {
-                let ty_1 = e_1.try_into_type(i)?;
-                let ty_2 = e_2.try_into_type(i)?;
-                Ok(Ty::Pi(x.to_owned(), box ty_1, box ty_2))
+                Ok(())
             }
-            _ => Err(eyre!("not a term of U({i})")),
+            Self::Succ(n) => {
+                t.is_nat(ctx.clone())?;
+                n.check(t, ctx)
+            }
+            Self::Zero | Self::NatLit(_) => t.is_nat(ctx),
+            Self::Pi(x, e_1, e_2) => {
+                let Ty::U(_i) = t else {
+                    return Err(eyre!("error"));
+                };
+
+                e_1.check(t, ctx.clone())?;
+
+                if ctx.contains_key(x) {
+                    return Err(eyre!("{x} already exists"));
+                }
+
+                let env: Env = ctx.clone().into();
+
+                let t_1: Ty = e_1.eval(env)?;
+
+                let ctx_1 = ctx.extend(x.to_owned(), t_1)?;
+                e_2.check(t, ctx_1)
+            }
+            Self::Lam(x, body) => {
+                let (t_1, closure) = t.is_pi(ctx.clone())?;
+                let t_2 =
+                    closure.eval(Value::Neutral(box t_1.clone(), Neutral::Var(x.to_owned())))?;
+                let ctx_1 = ctx.extend(x.to_owned(), t_1)?;
+                body.check(&t_2, ctx_1)
+            }
+            _ => {
+                let t_1 = self.synth(ctx.clone())?;
+                t_1.convert(t, Value::U(u8::MAX), ctx)
+            }
         }
     }
 
-    fn eval(self, env: HashMap<String, Value>) -> Result<Value> {
+    pub fn eval(&self, env: Env) -> Result<Value> {
         match self {
             Self::U(o) => Ok(Value::U(o.unwrap_or(0))),
             Self::Nat => Ok(Value::Nat),
@@ -143,64 +192,67 @@ impl Expr {
                 let value = e.eval(env)?;
 
                 match value {
-                    Value::Neutral(n) => Ok(Value::Neutral(Neutral::Succ(box n))),
+                    Value::Neutral(ty, n) => Ok(Value::Neutral(ty, Neutral::Succ(box n))),
                     Value::NatLit(l) => Ok(Value::NatLit(l + 1)),
                     _ => unreachable!(),
                 }
             }
-            Self::NatLit(n) => Ok(Value::NatLit(n)),
-            Self::Var(x) => Ok(env
-                .get(&x)
-                .cloned()
-                .unwrap_or_else(|| Value::Neutral(Neutral::Var(x)))),
-            Self::Pi(x, e_1, e_2) => {
-                let mut env_1 = env.clone();
-                let v_1 = e_1.eval(env)?;
-                env_1.insert(x.clone(), v_1.clone());
-                let v_2 = e_2.eval(env_1)?;
-                Ok(Value::Pi(x, box v_1, box v_2))
-            }
-            Self::The(_e_1, e_2) => e_2.eval(env),
-            Self::Lam(x, e) => {
-                let v = e.eval(env)?;
-                Ok(Value::Lam(x, box v))
-            }
-            Self::App(e_1, e_2) => {
-                let value = e_1.eval(env.clone())?;
+            Self::NatLit(n) => Ok(Value::NatLit(*n)),
+            Self::Var(x) => {
+                let v = env
+                    .get(x)
+                    .cloned()
+                    .wrap_err_with(|| eyre!("Missing value for {x}"))?;
 
-                match value {
-                    Value::Neutral(n) => {
-                        let value_1 = e_2.eval(env)?;
-                        Ok(Value::Neutral(Neutral::App(box n, box value_1)))
-                    }
-                    Value::Lam(x, v) => v.read_back().substitute(&e_2, &x).eval(env),
-                    _ => unreachable!(),
-                }
+                Ok(v)
             }
+            Self::Pi(x, dom, box ran) => {
+                let t = dom.eval(env.clone())?;
+
+                Ok(Value::Pi(
+                    box t,
+                    Closure {
+                        env,
+                        name: x.to_owned(),
+                        body: ran.to_owned(),
+                    },
+                ))
+            }
+            Self::The(_t, e) => e.eval(env),
+            Self::Lam(x, box body) => Ok(Value::Lam(Closure {
+                env,
+                name: x.to_owned(),
+                body: body.to_owned(),
+            })),
+            Self::App(rator, rand) => rator.eval(env.clone())?.do_apply(rand.eval(env)?),
             Self::Plus(e_1, e_2) => {
                 let v_1 = e_1.eval(env.clone())?;
                 let v_2 = e_2.eval(env)?;
 
                 match (v_1, v_2) {
                     (Value::NatLit(l_1), Value::NatLit(l_2)) => Ok(Value::NatLit(l_1 + l_2)),
-                    (Value::Neutral(n_1), v_2) => {
-                        Ok(Value::Neutral(Neutral::Plus(box n_1, box v_2)))
-                    }
-                    (v_1, Value::Neutral(n_2)) => {
-                        Ok(Value::Neutral(Neutral::Plus(box n_2, box v_1)))
-                    }
+                    (Value::Neutral(box t, n_1), v_2) => Ok(Value::Neutral(
+                        box t.clone(),
+                        Neutral::Plus(box n_1, box Normal { ty: t, value: v_2 }),
+                    )),
+                    (v_1, Value::Neutral(box t, n_2)) => Ok(Value::Neutral(
+                        box t.clone(),
+                        Neutral::Plus(box n_2, box Normal { ty: t, value: v_1 }),
+                    )),
                     _ => unreachable!(),
                 }
             }
         }
     }
 
-    pub fn normalize(self) -> Result<Self> {
-        let value = self.eval(HashMap::new())?;
-        Ok(value.read_back())
+    pub fn normalize(self, ctx: Ctx) -> Result<Normal> {
+        let ty = self.synth(ctx.clone())?;
+        let value = self.eval(ctx.into())?;
+
+        Ok(Normal { ty, value })
     }
 
-    pub fn synth(&self, ctx: HashMap<String, Ty>) -> Result<Ty> {
+    pub fn synth(&self, ctx: Ctx) -> Result<Ty> {
         match self {
             Self::Zero => Ok(Ty::Nat),
             Self::Succ(e) => {
@@ -209,22 +261,20 @@ impl Expr {
                 Ok(ty)
             }
             Self::NatLit(_n) => Ok(Ty::Nat),
-            Self::Var(x) => ctx.get(x).cloned().wrap_err_with(|| eyre!("{x} not found")),
-            Self::The(box e_1, e_2) => {
-                let ty: Ty = e_1.to_owned().try_into()?;
-                e_2.check(&ty, ctx)?;
-                Ok(ty)
+            Self::Var(x) => ctx.lookup_type(x).cloned(),
+            Self::The(ty, expr) => {
+                ty.check(&Ty::U(u8::MAX), ctx.clone())?;
+                let env: Env = ctx.clone().into();
+                let ty_1 = ty.eval(env)?;
+                expr.check(&ty_1, ctx)?;
+                Ok(ty_1)
             }
-            Self::App(e_1, e_2) => {
-                let ty_1 = e_1.synth(ctx.clone())?;
-
-                match ty_1 {
-                    Ty::Pi(_x, ty_2, ty_3) => {
-                        e_2.check(&ty_2, ctx)?;
-                        Ok(*ty_3)
-                    }
-                    _ => Err(eyre!("expected a function, found {e_1}")),
-                }
+            Self::App(rator, rand) => {
+                let ty = rator.synth(ctx.clone())?;
+                let (ty_1, closure) = ty.is_pi(ctx.clone())?;
+                rand.check(&ty_1, ctx.clone())?;
+                let env: Env = ctx.into();
+                closure.eval(rand.eval(env)?)
             }
             Self::Plus(e_1, e_2) => {
                 let ty = Ty::Nat;
@@ -236,24 +286,77 @@ impl Expr {
         }
     }
 
-    fn substitute(self, e: &Self, x: &String) -> Expr {
-        match self {
-            Self::U(_) | Self::Nat | Self::Zero | Self::NatLit(_) => self,
-            Self::Succ(e_1) => Self::Succ(box e_1.substitute(e, x)),
-            Self::Var(ref y) => {
-                if y == x {
-                    e.to_owned()
-                } else {
-                    self
-                }
+    // fn substitute(self, e: &Self, x: &String) -> Expr {
+    //     match self {
+    //         Self::U(_) | Self::Nat | Self::Zero | Self::NatLit(_) => self,
+    //         Self::Succ(e_1) => Self::Succ(box e_1.substitute(e, x)),
+    //         Self::Var(ref y) => {
+    //             if y == x {
+    //                 e.to_owned()
+    //             } else {
+    //                 self
+    //             }
+    //         }
+    //         Self::Pi(y, e_1, e_2) => {
+    //             Self::Pi(y, box e_1.substitute(e, x), box e_2.substitute(e, x))
+    //         }
+    //         Self::The(e_1, e_2) => Self::The(box e_1.substitute(e, x), box e_2.substitute(e, x)),
+    //         Self::Lam(y, e_1) => Self::Lam(y, box e_1.substitute(e, x)),
+    //         Self::App(e_1, e_2) => Self::App(box e_1.substitute(e, x), box e_2.substitute(e, x)),
+    //         Self::Plus(e_1, e_2) => Self::Plus(box e_1.substitute(e, x), box e_2.substitute(e, x)),
+    //     }
+    // }
+
+    fn alpha_equiv(&self, other: &Self) -> bool {
+        self.alpha_equiv_helper(other, 0, HashMap::new(), HashMap::new())
+    }
+
+    fn alpha_equiv_helper(
+        &self,
+        other: &Self,
+        i: usize,
+        ns_1: HashMap<Name, usize>,
+        ns_2: HashMap<Name, usize>,
+    ) -> bool {
+        match (self, other) {
+            (Self::U(i), Self::U(j)) => i == j,
+            (Self::Nat, Self::Nat) => true,
+            (Self::Zero, Self::Zero) => true,
+            (Self::Succ(e_1), Self::Succ(e_2)) => e_1.alpha_equiv_helper(e_2, i, ns_1, ns_2),
+            (Self::NatLit(n_1), Self::NatLit(n_2)) => n_1 == n_2,
+            (Self::Var(x), Self::Var(y)) => match (ns_1.get(x), ns_2.get(y)) {
+                (None, None) => x == y,
+                (Some(i), Some(j)) => i == j,
+                _ => false,
+            },
+            (Self::Pi(x, a_1, r_1), Self::Pi(y, a_2, r_2)) => {
+                a_1.alpha_equiv_helper(a_2, i, ns_1.clone(), ns_2.clone())
+                    && r_1.alpha_equiv_helper(
+                        r_2,
+                        i + 1,
+                        ns_1.update(x.to_owned(), i),
+                        ns_2.update(y.to_owned(), i),
+                    )
             }
-            Self::Pi(y, e_1, e_2) => {
-                Self::Pi(y, box e_1.substitute(e, x), box e_2.substitute(e, x))
+            (Self::The(t_1, e_1), Self::The(t_2, e_2)) => {
+                t_1.alpha_equiv_helper(t_2, i, ns_1.clone(), ns_2.clone())
+                    && e_1.alpha_equiv_helper(e_2, i, ns_1, ns_2)
             }
-            Self::The(e_1, e_2) => Self::The(box e_1.substitute(e, x), box e_2.substitute(e, x)),
-            Self::Lam(y, e_1) => Self::Lam(y, box e_1.substitute(e, x)),
-            Self::App(e_1, e_2) => Self::App(box e_1.substitute(e, x), box e_2.substitute(e, x)),
-            Self::Plus(e_1, e_2) => Self::Plus(box e_1.substitute(e, x), box e_2.substitute(e, x)),
+            (Self::Lam(x, body_1), Self::Lam(y, body_2)) => body_1.alpha_equiv_helper(
+                body_2,
+                i + 1,
+                ns_1.update(x.to_owned(), i),
+                ns_2.update(y.to_owned(), i),
+            ),
+            (Self::App(rator_1, rand_1), Self::App(rator_2, rand_2)) => {
+                rator_1.alpha_equiv_helper(rator_2, i, ns_1.clone(), ns_2.clone())
+                    && rand_1.alpha_equiv_helper(rand_2, i, ns_1.clone(), ns_2.clone())
+            }
+            (Self::Plus(a_1, b_1), Self::Plus(a_2, b_2)) => {
+                a_1.alpha_equiv_helper(a_2, i, ns_1.clone(), ns_2.clone())
+                    && b_1.alpha_equiv_helper(b_2, i, ns_1, ns_2)
+            }
+            _ => false,
         }
     }
 }
@@ -261,94 +364,144 @@ impl Expr {
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::U(None) => write!(f, "u"),
-            Self::U(Some(i)) => write!(f, "u({i})"),
-            Self::Nat => write!(f, "nat"),
-            Self::Zero => write!(f, "zero"),
+            Self::U(None) => 'U'.fmt(f),
+            Self::U(Some(i)) => write!(f, "U({i})"),
+            Self::Nat => "Nat".fmt(f),
+            Self::Zero => "zero".fmt(f),
             Self::Succ(e) => write!(f, "succ({e})"),
-            Self::NatLit(n) => write!(f, "{n}"),
-            Self::Var(x) => write!(f, "{x}"),
-            Self::Pi(x, e_1, e_2) => write!(f, "pi({x}, {e_1}, {e_2})"),
+            Self::NatLit(n) => n.fmt(f),
+            Self::Var(x) => x.fmt(f),
+            Self::Pi(x, e_1, e_2) => write!(f, "Pi({x} : {e_1}. {e_2})"),
             Self::The(e_1, e_2) => write!(f, "the({e_1}, {e_2})"),
-            Self::Lam(x, e) => write!(f, "lam({x}, {e})"),
-            Self::App(e_1, e_2) => write!(f, "{e_1} {e_2}"),
+            Self::Lam(x, e) => write!(f, "lam({x}. {e})"),
+            Self::App(e_1, e_2) => write!(f, "{e_1}({e_2})"),
             Self::Plus(e_1, e_2) => write!(f, "{e_1} + {e_2}"),
         }
     }
 }
 
-#[derive(Clone)]
-enum Neutral {
+#[derive(Clone, Debug)]
+pub enum Neutral {
+    Var(Name),
+    App(Box<Neutral>, Box<Normal>),
+    Plus(Box<Neutral>, Box<Normal>),
     Succ(Box<Neutral>),
-    Var(String),
-    App(Box<Neutral>, Box<Value>),
-    Plus(Box<Neutral>, Box<Value>),
 }
 
 impl Neutral {
-    fn read_back(self) -> Expr {
+    fn read_back(&self, ctx: Ctx) -> Expr {
         match self {
-            Self::Succ(n) => Expr::Succ(box n.read_back()),
-            Self::Var(x) => Expr::Var(x),
-            Self::App(n, v) => Expr::App(box n.read_back(), box v.read_back()),
-            Self::Plus(n, v) => Expr::Plus(box n.read_back(), box v.read_back()),
+            Self::Var(x) => Expr::Var(x.to_owned()),
+            Self::App(neu, arg) => {
+                Expr::App(box neu.read_back(ctx.clone()), box arg.read_back(ctx))
+            }
+            Self::Plus(neu, norm) => {
+                Expr::Plus(box neu.read_back(ctx.clone()), box norm.read_back(ctx))
+            }
+            Self::Succ(neu) => Expr::Succ(box neu.read_back(ctx)),
         }
     }
 }
 
-#[derive(Clone)]
-enum Value {
-    Neutral(Neutral),
-    U(u8),
-    Nat,
-    NatLit(u64),
-    Pi(String, Box<Value>, Box<Value>),
-    Lam(String, Box<Value>),
+#[derive(Clone, Debug)]
+pub struct Closure {
+    env: Env,
+    name: Name,
+    body: Expr,
+}
+
+impl Closure {
+    fn eval(&self, v: Value) -> Result<Value> {
+        let env = self.env.extend(self.name.clone(), v)?;
+        self.body.eval(env)
+    }
 }
 
 impl Value {
-    fn read_back(self) -> Expr {
-        match self {
-            Self::Neutral(neutral) => neutral.read_back(),
-            Self::U(i) => Expr::U(Some(i)),
-            Self::Nat => Expr::Nat,
-            Self::NatLit(n) => Expr::NatLit(n),
-            Self::Pi(x, v_1, v_2) => Expr::Pi(x, box v_1.read_back(), box v_2.read_back()),
-            Self::Lam(x, v) => Expr::Lam(x, box v.read_back()),
-        }
+    fn unexpected<T>(&self, msg: &str, ctx: Ctx) -> Result<T> {
+        let e = self.read_back_typed(&Value::U(u8::MAX), ctx);
+        Err(eyre!("{msg}: {e}"))
     }
-}
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Ty {
-    U(u8),
-    Nat,
-    Pi(String, Box<Ty>, Box<Ty>),
-}
+    fn is_pi(&self, ctx: Ctx) -> Result<(Ty, Closure)> {
+        let Self::Pi(box ty, closure) = self else {
+            return self.unexpected("Not a Pi type", ctx);
+        };
 
-impl TryFrom<Expr> for Ty {
-    type Error = Error;
+        Ok((ty.to_owned(), closure.to_owned()))
+    }
 
-    fn try_from(value: Expr) -> Result<Self, Self::Error> {
-        match value {
-            Expr::U(o) => Ok(Ty::U(o.unwrap_or(0))),
-            Expr::Nat => Ok(Ty::Nat),
-            Expr::Pi(x, box e_1, box e_2) => {
-                let ty_1: Ty = e_1.try_into()?;
-                let ty_2: Ty = e_2.try_into()?;
-                Ok(Ty::Pi(x, box ty_1, box ty_2))
+    fn is_nat(&self, ctx: Ctx) -> Result<()> {
+        let Self::Nat = self else {
+            return self.unexpected("Not Nat", ctx);
+        };
+
+        Ok(())
+    }
+
+    fn do_apply(&self, arg: Self) -> Result<Value> {
+        match self {
+            Self::Lam(closure) => closure.eval(arg),
+            Self::Neutral(box Ty::Pi(box dom, ran), neu) => {
+                let t = ran.eval(arg.to_owned())?;
+
+                Ok(Self::Neutral(
+                    box t,
+                    Neutral::App(
+                        box neu.to_owned(),
+                        box Normal {
+                            ty: dom.to_owned(),
+                            value: arg,
+                        },
+                    ),
+                ))
             }
-            _ => Err(eyre!("not a type")),
+            _ => Err(eyre!("error")),
         }
     }
 }
 
-impl fmt::Display for Ty {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::U(i) => write!(f, "U({i})"),
-            Self::Nat => write!(f, "Nat"),
-            Self::Pi(x, ty_1, ty_2) => write!(f, "Pi({x}, {ty_1}, {ty_2})"),
+pub type Ty = Value;
+
+#[derive(Clone, Debug)]
+pub struct Normal {
+    pub ty: Ty,
+    pub value: Value,
+}
+
+impl Normal {
+    pub fn read_back(&self, ctx: Ctx) -> Expr {
+        self.value.read_back_typed(&self.ty, ctx)
+    }
+}
+
+impl Value {
+    pub fn read_back_typed(&self, ty: &Ty, ctx: Ctx) -> Expr {
+        match (self, ty) {
+            (Self::Neutral(_t, neutral), _) => neutral.read_back(ctx),
+            (Self::U(i), Ty::U(j)) if i < j => Expr::U(if *i == 0 { None } else { Some(*i) }),
+            (Self::Nat, Ty::U(_i)) => Expr::Nat,
+            (Self::NatLit(n), Ty::Nat) => Expr::NatLit(*n),
+            (Self::Pi(t, closure), Ty::U(_i)) => Expr::Pi(
+                closure.name.clone(),
+                box t.read_back_typed(ty, ctx),
+                box closure.body.clone(),
+            ),
+            (Self::Lam(closure), Ty::Pi(_ty, _closure)) => {
+                Expr::Lam(closure.name.clone(), box closure.body.clone())
+            }
+            _ => unreachable!(),
         }
+    }
+
+    fn convert(&self, other: &Self, t: Ty, ctx: Ctx) -> Result<()> {
+        let e_1 = self.read_back_typed(&t, ctx.clone());
+        let e_2 = other.read_back_typed(&t, ctx);
+
+        if !e_1.alpha_equiv(&e_2) {
+            return Err(eyre!("{e_1} is not the same type as {e_2}"));
+        }
+
+        Ok(())
     }
 }

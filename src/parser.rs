@@ -10,7 +10,7 @@ use nom::{
     IResult,
 };
 
-fn identifier(input: &str) -> IResult<&str, &str> {
+pub fn identifier(input: &str) -> IResult<&str, &str> {
     recognize(pair(
         alt((alpha1, tag("_"))),
         many0_count(alt((alphanumeric1, tag("_")))),
@@ -20,10 +20,10 @@ fn identifier(input: &str) -> IResult<&str, &str> {
 fn primitive(input: &str) -> IResult<&str, Expr> {
     alt((
         map(
-            preceded(char('u'), opt(preceded(multispace0, parens(ws(u8))))),
+            preceded(char('U'), opt(preceded(multispace0, parens(ws(u8))))),
             Expr::U,
         ),
-        value(Expr::Nat, tag("nat")),
+        value(Expr::Nat, tag("Nat")),
         value(Expr::Zero, tag("zero")),
         map(
             preceded(pair(tag("succ"), multispace0), parens(ws(expr))),
@@ -39,18 +39,18 @@ fn primitive(input: &str) -> IResult<&str, Expr> {
         map(
             preceded(
                 pair(tag("lam"), multispace0),
-                parens(pair(ws(identifier), preceded(char(','), ws(expr)))),
+                parens(pair(ws(identifier), preceded(char('.'), ws(expr)))),
             ),
             |(x, e)| Expr::Lam(x.to_owned(), box e),
         ),
         map(u64, Expr::NatLit),
         map(
             preceded(
-                pair(tag("pi"), multispace0),
+                pair(tag("Pi"), multispace0),
                 parens(tuple((
                     ws(identifier),
-                    preceded(char(','), ws(expr)),
-                    preceded(char(','), ws(expr)),
+                    preceded(char(':'), ws(expr)),
+                    preceded(char('.'), ws(expr)),
                 ))),
             ),
             |(x, e_1, e_2)| Expr::Pi(x.to_owned(), box e_1, box e_2),
@@ -105,7 +105,7 @@ pub fn expr(input: &str) -> IResult<&str, Expr> {
 //     ))(input)
 // }
 
-fn ws<'a, F: 'a, O, E: ParseError<&'a str>>(
+pub fn ws<'a, F: 'a, O, E: ParseError<&'a str>>(
     inner: F,
 ) -> impl FnMut(&'a str) -> IResult<&'a str, O, E>
 where
@@ -114,7 +114,7 @@ where
     delimited(multispace0, inner, multispace0)
 }
 
-fn parens<'a, F: 'a, O, E: ParseError<&'a str>>(
+pub fn parens<'a, F: 'a, O, E: ParseError<&'a str>>(
     inner: F,
 ) -> impl FnMut(&'a str) -> IResult<&'a str, O, E>
 where
